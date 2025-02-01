@@ -10,6 +10,10 @@
 #include <unordered_map>
 #include <map>
 
+#ifdef IMGUI_EDITOR_QSEXP
+#include <string_view>
+#endif // IMGUI_EDITOR_QSEXP
+
 #ifdef IMGUI_EDITOR_NO_BOOST
 	#include <regex>
 	namespace boost = std;
@@ -105,10 +109,18 @@ public:
 		static const LanguageDefinition& Cs();
 		static const LanguageDefinition& Json();
 		static const LanguageDefinition& Markdown();
+#ifdef IMGUI_EDITOR_QSEXP
+		static const LanguageDefinition& QuakeEntities();
+#endif // IMGUI_EDITOR_QSEXP
 	};
 
+#ifdef IMGUI_EDITOR_QSEXP
+	void SetLanguageDefinition(const LanguageDefinition* aLanguageDef);
+	inline const LanguageDefinition* GetLanguageDefinition() const { return mLanguageDefinition; };
+#else // IMGUI_EDITOR_QSEXP
 	void SetLanguageDefinition(const LanguageDefinition& aLanguageDef);
 	inline const LanguageDefinition& GetLanguageDefinition() const { return *mLanguageDefinition; };
+#endif // IMGUI_EDITOR_QSEXP
 	const char* GetLanguageDefinitionName() const;
 	void SetTabSize(int aValue);
 	inline int GetTabSize() const { return mTabSize; }
@@ -149,7 +161,11 @@ public:
 	inline bool CanRedo() const { return !mReadOnly && mUndoIndex < (int)mUndoBuffer.size(); };
 	inline int GetUndoIndex() const { return mUndoIndex; };
 
+#ifdef IMGUI_EDITOR_QSEXP
+	void SetText(const std::string_view& aText);
+#else // !IMGUI_EDITOR_QSEXP
 	void SetText(const std::string& aText);
+#endif // IMGUI_EDITOR_QSEXP
 	std::string GetText() const;
 
 	void SetTextLines(const std::vector<std::string>& aLines);
@@ -468,6 +484,31 @@ private:
 	float mPaletteAlpha;
 	const LanguageDefinition* mLanguageDefinition = nullptr;
 	RegexList mRegexList;
+
+#ifdef IMGUI_EDITOR_QSEXP
+	void RenderFindReplace(const ImVec2& cursorPos, const ImVec2& contentRegionAvail);
+
+	// https://github.com/goossens/ObjectTalk -> ide/script/OtObjectTalkEditor.h
+	std::string mFindText;
+	std::string mReplaceText;
+	
+	bool mFindReplaceVisible = false;
+	bool mFocusOnFind = false;
+	bool mCaseSensitiveFind = false;
+	bool mWholeWordFind = false;
+
+	bool mFocusOnEditor = true;
+	
+	void OpenFindReplace();
+	void Find();
+	void FindAll();
+	void Replace();
+	void ReplaceAll();
+	
+	// https://github.com/goossens/ObjectTalk -> gfx/framework/OtUi.h
+	static bool InputStdString(const char* label, std::string* value, ImGuiInputTextFlags flags = ImGuiInputTextFlags_None);
+	static bool LatchButton(const char* label, bool* value, const ImVec2& size);
+#endif // IMGUI_EDITOR_QSEXP
 
 	inline bool IsHorizontalScrollbarVisible() const { return mCurrentSpaceWidth > mContentWidth; }
 	inline bool IsVerticalScrollbarVisible() const { return mCurrentSpaceHeight > mContentHeight; }

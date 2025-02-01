@@ -27,6 +27,21 @@ void TextEditor::SetPalette(const Palette& aValue)
 	mPaletteAlpha = -1.0f;
 }
 
+#ifdef IMGUI_EDITOR_QSEXP
+void TextEditor::SetLanguageDefinition(const LanguageDefinition* aLanguageDef)
+{
+	mLanguageDefinition = aLanguageDef;
+	mRegexList.clear();
+	
+	if (mLanguageDefinition)
+	{
+		for (const auto& r : mLanguageDefinition->mTokenRegexStrings)
+			mRegexList.push_back(std::make_pair(boost::regex(r.first, boost::regex_constants::optimize), r.second));
+	}
+
+	Colorize();
+}
+#else // !IMGUI_EDITOR_QSEXP
 void TextEditor::SetLanguageDefinition(const LanguageDefinition& aLanguageDef)
 {
 	mLanguageDefinition = &aLanguageDef;
@@ -36,6 +51,7 @@ void TextEditor::SetLanguageDefinition(const LanguageDefinition& aLanguageDef)
 
 	Colorize();
 }
+#endif // IMGUI_EDITOR_QSEXP
 
 const char* TextEditor::GetLanguageDefinitionName() const
 {
@@ -316,7 +332,11 @@ void TextEditor::Redo(int aSteps)
 		mUndoBuffer[mUndoIndex++].Redo(this);
 }
 
+#ifdef IMGUI_EDITOR_QSEXP
+void TextEditor::SetText(const std::string_view& aText)
+#else // !IMGUI_EDITOR_QSEXP
 void TextEditor::SetText(const std::string& aText)
+#endif // IMGUI_EDITOR_QSEXP
 {
 	mLines.clear();
 	mLines.emplace_back(Line());
@@ -401,6 +421,11 @@ std::vector<std::string> TextEditor::GetTextLines() const
 
 bool TextEditor::Render(const char* aTitle, bool aParentIsFocused, const ImVec2& aSize, bool aBorder)
 {
+#ifdef IMGUI_EDITOR_QSEXP
+	const ImVec2 cursorPos = ImGui::GetCursorPos();
+	const ImVec2 contentRegionAvail = ImGui::GetContentRegionAvail();
+#endif // IMGUI_EDITOR_QSEXP
+	
 	if (mCursorPositionChanged)
 		OnCursorPositionChanged();
 	mCursorPositionChanged = false;
@@ -424,11 +449,30 @@ bool TextEditor::Render(const char* aTitle, bool aParentIsFocused, const ImVec2&
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor();
 
+#ifdef IMGUI_EDITOR_QSEXP
+	RenderFindReplace(cursorPos, contentRegionAvail);
+#endif // IMGUI_EDITOR_QSEXP
+	
 	return isFocused;
 }
 
 // ------------------------------------ //
 // ---------- Generic utils ----------- //
+
+#ifdef IMGUI_EDITOR_QSEXP
+
+static constexpr int UTF8CharLength(char)
+{
+	return 1;
+}
+
+static constexpr int ImTextCharToUtf8(char* buf, int, unsigned int c)
+{
+	buf[0] = c;
+	return 1;
+}
+
+#else // !IMGUI_EDITOR_QSEXP
 
 // https://en.wikipedia.org/wiki/UTF-8
 // We assume that the char is a standalone character (<128) or a leading byte of an UTF-8 code sequence (non-10xxxxxx code)
@@ -484,6 +528,8 @@ static inline int ImTextCharToUtf8(char* buf, int buf_size, unsigned int c)
 		return 3;
 	}
 }
+
+#endif // IMGUI_EDITOR_QSEXP
 
 static inline bool CharIsWordChar(char ch)
 {
@@ -2220,6 +2266,12 @@ void TextEditor::HandleKeyboardInputs(bool aParentIsFocused)
 			SelectAll();
 		else if (isShortcut && ImGui::IsKeyPressed(ImGuiKey_D))
 			AddCursorForNextOccurrence();
+#ifdef IMGUI_EDITOR_QSEXP
+		else if (isShortcut && ImGui::IsKeyPressed(ImGuiKey_F))
+			OpenFindReplace();
+		else if (isShortcut && ImGui::IsKeyPressed(ImGuiKey_G))
+			Find();
+#endif // IMGUI_EDITOR_QSEXP
         else if (!mReadOnly && !alt && !ctrl && !shift && !super && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)))
 			EnterCharacter('\n', false);
 		else if (!mReadOnly && !alt && !ctrl && !super && ImGui::IsKeyPressed(ImGuiKey_Tab))
@@ -2831,9 +2883,13 @@ void TextEditor::ColorizeRange(int aFromLine, int aToLine)
 
 				for (const auto& p : mRegexList)
 				{
+#ifdef IMGUI_EDITOR_QSEXP
+					bool regexSearchResult = boost::regex_search(first, last, results, p.first, boost::regex_constants::match_continuous);
+#else // !IMGUI_EDITOR_QSEXP
 					bool regexSearchResult = false;
 					try { regexSearchResult = boost::regex_search(first, last, results, p.first, boost::regex_constants::match_continuous); }
 					catch (...) {}
+#endif // IMGUI_EDITOR_QSEXP
 					if (regexSearchResult)
 					{
 						hasTokenizeResult = true;
@@ -3175,3 +3231,231 @@ const std::unordered_map<char, char> TextEditor::CLOSE_TO_OPEN_CHAR = {
 };
 
 TextEditor::Palette TextEditor::defaultPalette = TextEditor::GetDarkPalette();
+
+#ifdef IMGUI_EDITOR_QSEXP
+
+// https://github.com/goossens/ObjectTalk -> ide/script/OtObjectTalkEditor.cpp
+
+void TextEditor::RenderFindReplace(const ImVec2& cursorPos, const ImVec2& contentRegionAvail)
+{
+	if (!mFindReplaceVisible)
+		return;
+
+	// calculate sizes
+	ImGuiStyle& style = ImGui::GetStyle();
+	constexpr float fieldWidth = 250.0f;
+
+	const float replaceWidth = ImGui::CalcTextSize("Replace").x + style.FramePadding.x * 2.0f;
+	const float replaceAllWidth = ImGui::CalcTextSize("Replace All").x + style.FramePadding.x * 2.0f;
+	const float optionWidth = ImGui::CalcTextSize("Aa").x + style.FramePadding.x * 2.0f;
+
+	const float windowHeight =
+		style.ChildBorderSize * 2.0f +
+		style.WindowPadding.y * 2.0f +
+		ImGui::GetFrameHeight() * (mReadOnly ? 1.0f : 2.0f) +
+		(mReadOnly ? 0 : style.ItemSpacing.y);
+
+	const float windowWidth =
+		style.ChildBorderSize * 2.0f +
+		style.WindowPadding.x * 2.0f +
+		fieldWidth + style.ItemSpacing.x +
+		replaceWidth + style.ItemSpacing.x +
+		replaceAllWidth + style.ItemSpacing.x +
+		optionWidth * 3.0f + style.ItemSpacing.x * 2.0f;
+
+	// create window
+	ImGui::SetCursorPos(ImVec2(
+		cursorPos.x + contentRegionAvail.x - windowWidth - style.ScrollbarSize - style.ItemSpacing.x,
+		cursorPos.y + style.ItemSpacing.y * 2.0f));
+
+	ImVec4 childBgColor = style.Colors[ImGuiCol_WindowBg];
+	childBgColor.w = 0.7f;
+
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, childBgColor);
+	ImGui::BeginChild("find-replace", ImVec2(windowWidth, windowHeight), ImGuiChildFlags_Borders);
+	ImGui::PopStyleColor();
+
+	ImGui::SetNextItemWidth(fieldWidth);
+
+	if (mFocusOnFind)
+	{
+		ImGui::SetKeyboardFocusHere();
+		mFocusOnFind = false;
+	}
+
+	if (InputStdString("###find", &mFindText))
+	{
+		if (mFindText.size())
+		{
+			SetCursorPosition(0, 0);
+			SelectNextOccurrenceOf(mFindText.c_str(), int(mFindText.size()), mCaseSensitiveFind, mWholeWordFind);
+		}
+		else
+			ClearSelections();
+	}
+
+	if (mFindText.empty())
+		ImGui::BeginDisabled();
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("Find", ImVec2(replaceWidth, 0.0f)))
+		Find();
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("Find All", ImVec2(replaceAllWidth, 0.0f)))
+		FindAll();
+
+	if (mFindText.empty())
+		ImGui::EndDisabled();
+
+	ImGui::SameLine();
+
+	if (LatchButton("Aa", &mCaseSensitiveFind, ImVec2(optionWidth, 0.0f)))
+	{
+		SetCursorPosition(0, 0);
+		Find();
+	}
+
+	ImGui::SameLine();
+
+	if (LatchButton("[]", &mWholeWordFind, ImVec2(optionWidth, 0.0f)))
+	{
+		SetCursorPosition(0, 0);
+		Find();
+	}
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("x", ImVec2(optionWidth, 0.0f)))
+	{
+		mFindReplaceVisible = false;
+		mFocusOnEditor = true;
+	}
+
+	if (!mReadOnly)
+	{
+		ImGui::SetNextItemWidth(fieldWidth);
+		InputStdString("###replace", &mReplaceText);
+		ImGui::SameLine();
+
+		if (mFindText.empty() || mReplaceText.empty())
+			ImGui::BeginDisabled();
+
+		if (ImGui::Button("Replace", ImVec2(replaceWidth, 0.0f)))
+			Replace();
+
+		ImGui::SameLine();
+
+		if (ImGui::Button("Replace All", ImVec2(replaceAllWidth, 0.0f)))
+			ReplaceAll();
+
+		if (mFindText.empty() || mReplaceText.empty())
+			ImGui::EndDisabled();
+	}
+
+	ImGui::EndChild();
+}
+
+void TextEditor::OpenFindReplace()
+{
+	mFindReplaceVisible = true;
+	mFocusOnFind = true;
+}
+
+void TextEditor::Find()
+{
+	if (mFindText.empty())
+		return;
+
+	SelectNextOccurrenceOf(mFindText.c_str(), int(mFindText.size()), mCaseSensitiveFind, mWholeWordFind);
+	mFocusOnEditor = true;
+}
+
+void TextEditor::FindAll()
+{
+	if (mFindText.empty())
+		return;
+
+	SelectAllOccurrencesOf(mFindText.c_str(), int(mFindText.size()), mCaseSensitiveFind, mWholeWordFind);
+	mFocusOnEditor = true;
+}
+
+void TextEditor::Replace()
+{
+	if (mFindText.empty())
+		return;
+
+	if (!AnyCursorHasSelection())
+		SelectNextOccurrenceOf(mFindText.c_str(), int(mFindText.size()), mCaseSensitiveFind, mWholeWordFind);
+
+	ReplaceTextInCurrentCursor(mReplaceText);
+	SelectNextOccurrenceOf(mFindText.c_str(), int(mFindText.size()), mCaseSensitiveFind, mWholeWordFind);
+	mFocusOnEditor = true;
+}
+
+void TextEditor::ReplaceAll()
+{
+	if (mFindText.empty())
+		return;
+
+	SelectAllOccurrencesOf(mFindText.c_str(), int(mFindText.size()), mCaseSensitiveFind, mWholeWordFind);
+	ReplaceTextInAllCursors(mReplaceText);
+	ClearExtraCursors();
+	mFocusOnEditor = true;
+}
+
+// https://github.com/goossens/ObjectTalk -> gfx/framework/OtUi.h
+
+// create an input field based on a std::string
+bool TextEditor::InputStdString(const char* label, std::string* value, ImGuiInputTextFlags flags)
+{
+	flags |= ImGuiInputTextFlags_NoUndoRedo | ImGuiInputTextFlags_CallbackResize;
+
+	return ImGui::InputText(label, value->data(), value->capacity() + 1, flags, [](ImGuiInputTextCallbackData* data)
+	{
+		if (data->EventFlag == ImGuiInputTextFlags_CallbackResize)
+		{
+			std::string* value = static_cast<std::string*>(data->UserData);
+			value->resize(data->BufTextLen);
+			data->Buf = value->data();
+		}
+
+		return 0;
+	}, value);
+}
+
+// https://github.com/goossens/ObjectTalk -> gfx/framework/OtUi.cpp
+	
+bool TextEditor::LatchButton(const char* label, bool* value, const ImVec2& size)
+{
+	bool changed = false;
+	ImVec4* colors = ImGui::GetStyle().Colors;
+
+	if (*value)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_ButtonActive]);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_ButtonActive]);
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors[ImGuiCol_TableBorderLight]);
+	}
+	else
+	{
+		ImGui::PushStyleColor(ImGuiCol_Button, colors[ImGuiCol_TableBorderLight]);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, colors[ImGuiCol_TableBorderLight]);
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors[ImGuiCol_ButtonActive]);
+	}
+
+	ImGui::Button(label, size);
+
+	if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+	{
+		*value = !*value;
+		changed = true;
+	}
+
+	ImGui::PopStyleColor(3);
+	return changed;
+}
+
+#endif // IMGUI_EDITOR_QSEXP
